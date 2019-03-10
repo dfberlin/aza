@@ -5,7 +5,34 @@
 set -e
 POOL=zroot
 DEVICE=sda
-EFI_END=200 
+EFI_END=200
+
+disk_id() {
+    # Echo the /dev/disk/by-id entry that matches $1
+    # Echo "none" in case no match has been found.
+    # Example:
+    # disk_id sda1
+    local match=none
+    local b_dev
+    local b_id
+    local id
+    for id in /dev/disk/by-id/* ; do
+        b_id=$(basename ${id})
+        b_dev=$(basename $(readlink ${id}))
+        [ "$b_dev" = "$1" ] && match=${b_id} && break
+    done
+    echo $match
+}
+
+error() {
+	local code=$2
+	echo "$0: $1"
+	exit ${code:=1}
+}
+
+# Make sure the device does exist.
+[ -b "/dev/${DEVICE}" ] || error "/dev/${DEVICE} does not exist on this system."
+
 # Partition the disk
 parted --script /dev/${DEVICE} unit MiB mklabel gpt mkpart fat32 1 ${EFI_END} mkpart primary ${EFI_END} 100% set 1 esp on
 
@@ -13,16 +40,15 @@ parted --script /dev/${DEVICE} unit MiB mklabel gpt mkpart fat32 1 ${EFI_END} mk
 while [ ! -b /dev/${DEVICE}1 ] ; do sleep 1 ; done
 mkfs.vfat -F32 /dev/${DEVICE}1
 
-# Wait for partitions to show up in /dev/disk/by-id
-found=0
-ls /dev/disk/by-id | grep -qe "-part2$" && found=1
-while [ $found -eq 0 ] ; do
+# Wait for partition 2 to show up in /dev/disk/by-id
+vdev=$(disk_id ${DEVICE}2)
+while [ "$vdev" = none ] ; do
 	sleep 1
-	ls /dev/disk/by-id | grep -qe "-part2$" && found=1	
+	vdev=$(disk_id ${DEVICE}2)
 done
 
 # Create the ZPOOL
-vdev=$(ls -l /dev/disk/by-id/*-part2 | grep ${DEVICE} | awk '{ print $9 }')
+#vdev=$(ls -l /dev/disk/by-id/*-part2 | grep ${DEVICE} | awk '{ print $9 }')
 zpool create -O compression=lz4 -O mountpoint=none ${POOL} ${vdev}
 
 # Export and re-eimport the pool so the the datasets we are going to create do not clash with existing mountpoints.
@@ -53,6 +79,8 @@ pacman-key --lsign-key F75D9D76
 # Bootstrap target.
 pacstrap /mnt base zfs-linux base-devel git
 
+# Add an fstab entry for the EFI partition.
+echo "/dev/disk/by-id/$(disk_id ${DEVICE}1) /boot vfat defaults 0 1" >> /mnt/etc/fstab
 # Make sure the installed system can get updates for ZFS.
 echo -e '[archzfs]\nServer = http://archzfs.com/$repo/x86_64' >> /mnt/etc/pacman.conf
 arch-chroot /mnt pacman-key -r F75D9D76 && pacman-key --lsign-key F75D9D76
