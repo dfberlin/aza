@@ -9,15 +9,17 @@ EFI_END=200
 # Partition the disk
 parted --script /dev/${DEVICE} unit MiB mklabel gpt mkpart fat32 1 ${EFI_END} mkpart primary ${EFI_END} 100% set 1 esp on
 
-# Wait for partitions to show up in /dev/disk/by-id
-ls /dev/disk/by-id | grep -qe "-part2$"
-while [ $? -ne 0 ] ; do
-	sleep 1
-	ls /dev/disk/by-id | grep -qe "-part2$"
-done
-
-# Format the EFI partition
+# Format the EFI partition and make sure that the created partion appears in /dev before proceeding.
+while [ ! -b /dev/${DEVICE}1 ] ; do sleep 1 ; done
 mkfs.vfat -F32 /dev/${DEVICE}1
+
+# Wait for partitions to show up in /dev/disk/by-id
+found=0
+ls /dev/disk/by-id | grep -qe "-part2$" && found=1
+while [ $found -eq 0 ] ; do
+	sleep 1
+	ls /dev/disk/by-id | grep -qe "-part2$" && found=1	
+done
 
 # Create the ZPOOL
 vdev=$(ls -l /dev/disk/by-id/*-part2 | grep ${DEVICE} | awk '{ print $9 }')
@@ -34,9 +36,9 @@ zfs create -o mountpoint=/ ${POOL}/ROOT/default
 zfs create -o mountpoint=/home ${POOL}/data/home
 # Set acl type (required?)
 zfs set acltype=posixacl ${POOL}/ROOT/default
-# Set boot fs (required ?)
-#zpool set bootfs=${POOL}/ROOT/default ${POOL}
+
 # We want the default dataset to be mounted now, but not automatically mounted in general.
+# This is requried to be able to use boot environments.
 zfs set canmount=noauto ${POOL}/ROOT/default
 
 # Create the boot / efi mountpoint and mount the efi partition
@@ -78,6 +80,12 @@ sed -i 's/^HOOKS.*$/HOOKS=(base udev autodetect modconf block keyboard systemd s
 # Build the initramfs once again to have the zfs and the systemd support we just built in it.
 mkinitcpio -p linux
 bootctl --path=/boot install
+
+# Enable systemd ZFS related targets
+systemctl enable zfs.target
+systemctl enable zfs-import-cache
+systemctl enable zfs-mount
+systemctl enable zfs-import.target
 EOF
 
 # Execute the sub-script we spit out in the step before
