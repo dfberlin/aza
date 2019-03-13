@@ -4,21 +4,24 @@
 #
 set -e
 POOL=zroot
-DEVICE=sda
+DEVICE=vda
 EFI_END=512
-
+GPT_MAX_LABEL_LENGTH=72
 ZEDENV_PKGS="python python-setuptools python-click python-pip"
 
+BY=by-partlabel
+
 disk_id() {
-    # Echo the /dev/disk/by-id entry that matches $1
+    # Echo the /dev/disk/$2 entry that matches $1
     # Echo "none" in case no match has been found.
     # Example:
-    # disk_id sda1
+    # disk_id sda1 by-id
+	local by=$2
     local match=none
     local b_dev
     local b_id
     local id
-    for id in /dev/disk/by-id/* ; do
+    for id in /dev/disk/${by:=by-id}/* ; do
         b_id=$(basename ${id})
         b_dev=$(basename $(readlink ${id}))
         [ "$b_dev" = "$1" ] && match=${b_id} && break
@@ -51,23 +54,41 @@ set_hostname() {
 	echo ${hostname:=nohostname} > /mnt/etc/hostname
 }
 
+#
+# Main
+#
+
 # Make sure the target device does exist.
 [ -b "/dev/${DEVICE}" ] || error "/dev/${DEVICE} does not exist on this system."
+# Read the devices serial number, assuming that it is unique.
+serial=$(udevadm info --query=all --name=/dev/${DEVICE} | grep ID_SERIAL_SHORT | sed 's/^.*=//')
+num=1 # For testing only
+[ ${#serial} -eq 0 ] && serial="disk-${num}" # Virtual disks tend to not have a serial number. We use a dummy here.
+#[ ${#serial} -eq 0 ] && error "${DEVICE} does not have a serial number."
+name_part_efi="${serial}-p1" 
+name_part_zfs="${serial}-p2"
+if [ ${#name_part_efi} -gt $GPT_MAX_LABEL_LENGTH ] ; then
+	error "Partiton label ${name_part_efi} is ${#name_part_efi} characters long. The maximum size of a label is ${GPT_MAX_LABEL_LENGTH}."
+elif [ ${#name_part_zfs} -gt $GPT_MAX_LABEL_LENGTH ] ; then
+	error "Partiton label ${name_part_zfs} is ${#name_part_zfs} characters long. The maximum size of a label is ${GPT_MAX_LABEL_LENGTH}."
+fi
 # Partition the disk
-parted --script /dev/${DEVICE} unit MiB mklabel gpt mkpart fat32 1 ${EFI_END} mkpart primary ${EFI_END} 100% set 1 esp on
+parted --script /dev/${DEVICE} unit MiB mklabel gpt mkpart fat32 1 ${EFI_END} mkpart primary ${EFI_END} 100% set 1 esp on name 1 ${name_part_efi} name 2 ${name_part_zfs}
 # Format the EFI partition and make sure that the created partion appears in /dev before proceeding.
+
 while [ ! -b /dev/${DEVICE}1 ] ; do sleep 1 ; done
 mkfs.vfat -F32 /dev/${DEVICE}1
 
-# Wait for partition 2 to show up in /dev/disk/by-id
-vdev=$(disk_id ${DEVICE}2)
-while [ "$vdev" = none ] ; do
+# Wait up to 10 seconds for partition 2 to show up in /dev/disk/${BY}
+vdev=$(disk_id ${DEVICE}2 ${BY})
+for count in {1..10} ; do
 	sleep 1
-	vdev=$(disk_id ${DEVICE}2)
+	vdev=$(disk_id ${DEVICE}2 ${BY})
 done
+[ "$vdev" = "none" ] && error "No /dev/disk/${BY} entry found for ${DEVICE}. Giving up." 
 
 # Create the ZPOOL
-zpool create -O compression=lz4 -O mountpoint=none ${POOL} ${vdev}
+zpool create -f -O compression=lz4 -O mountpoint=none ${POOL} ${vdev}
 
 # Export and re-eimport the pool so the the datasets we are going to create do not clash with existing mountpoints.
 zpool export ${POOL}
@@ -107,13 +128,13 @@ set_hostname
 enable_sshd
 # Make sure the installed system can get updates for ZFS.
 echo -e '[archzfs]\nServer = http://archzfs.com/$repo/x86_64' >> /mnt/etc/pacman.conf
-arch-chroot /mnt pacman-key -r F75D9D76 && pacman-key --lsign-key F75D9D76
+chexec "pacman-key -r F75D9D76 && pacman-key --lsign-key F75D9D76"
 
 mkdir -p /mnt/etc/zfs
 # Home directory for temporary install user
 zfs create ${POOL}/data/home/install
-arch-chroot /mnt useradd -M -g users -s /bin/bash install
-arch-chroot /mnt chown install /home/install
+chexec "useradd -M -g users -s /bin/bash install"
+chexec "/mnt chown install /home/install"
 
 cat > /mnt/home/install/setup.sh << EOF
 #!/bin/bash
@@ -149,15 +170,24 @@ systemctl enable zfs-import.target
 EOF
 
 # Execute the sub-script we spit out in the step before
-arch-chroot /mnt bash /home/install/setup.sh
-
+chexec "bash /home/install/setup.sh"
 # Create an entry for the boot loader
 echo "Creating boot loader entry ..."
-printf "default arch\ntimeout 3\n" > /mnt/boot/loader/loader.conf
-printf "title\tArch Linux\nlinux\t/vmlinuz-linux\ninitrd\tinitramfs-linux.img\noptions\troot=zfs:${POOL}/ROOT/default rw\n" > /mnt/boot/loader/entries/arch.conf
+
+cat > /mnt/boot/loader/loader.conf << EOF
+default arch
+timeout 3
+EOF
+
+cat > /mnt/boot/loader/entries/arch.conf << EOF
+title	Arch Linux
+linux	/vmlinuz-linux
+initrd	initramfs-linux.img
+options	root=zfs:${POOL}/ROOT/default rw
+EOF
 
 # The install user is no longer required - sorry :(
-arch-chroot /mnt userdel install
+chexec "/mnt userdel install"
 # The corresponding dataset neither
 #zfs destroy ${POOL}/data/home/install
 
