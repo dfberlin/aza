@@ -7,7 +7,7 @@ POOL=zroot
 DEVICE=vda
 EFI_END=512
 LTS="-lts"
-LTS=""
+#LTS=""
 
 # Can be dkms or binary
 ZFS_KERNEL_MODULES=dkms
@@ -123,7 +123,7 @@ zfs create -o mountpoint=none ${POOL}/data
 zfs create -o mountpoint=none ${POOL}/ROOT
 zfs create -o mountpoint=/ ${POOL}/ROOT/default
 zfs create -o mountpoint=/home ${POOL}/data/home
-# Set acl type (required?)
+# Set acl type - required for systemd.
 zfs set acltype=posixacl ${POOL}/ROOT/default
 # Set bootfs (required by zedenv)
 zpool set bootfs=${POOL}/ROOT/default ${POOL}
@@ -145,9 +145,14 @@ pacman-key --lsign-key F75D9D76
 # This way we have the choice to use any kernel package we want (lts or non-lts)
 # for the base system while skipping the default kernel.
 base_stripped=$(pacman -Sg base | sed 's/^base //; /^linux$/d' | tr '\n' ' ')
-#pacstrap /mnt base zfs-linux base-devel git $ZEDENV_PKGS openssh
-pacstrap /mnt $base_stripped linux${LTS} zfs-linux${LTS} $ZEDENV_PKGS $EXTRA_PKGS
-#pacstrap /mnt $base_stripped linux${LTS} base-devel git
+pacstrap /mnt $base_stripped linux${LTS} zfs-linux${LTS} pacman
+
+#
+# Now we are free to chroot into the fresh system.
+#
+
+# Install extra packages
+chexec "pacman --noconfirm -S ${EXTRA_PKGS}"
 
 # Home directory for temporary install user
 zfs create ${POOL}/data/home/install
@@ -174,9 +179,20 @@ fi
 
 mkdir -p /mnt/etc/zfs
 
+#
+# Build and install AUR packages
+#
+message "Building and installing AUR packages."
+# Potentially speed up building of packages by enabeling parallel builds.
+echo "MAKEFLAGS=\"-j$(cpu_core_count)\"" >> /mnt/etc/makepkg.conf
 
 cat > /mnt/home/install/setup.sh << EOF
 #!/bin/bash
+set -e
+as_aur_user() {
+	su - install -c "\$1"
+}
+
 ln -sf /usr/share/zoneinfo/Europe/Berlin /etc/localtime
 hwclock --systohc
 
@@ -187,17 +203,14 @@ echo "KEYMAP=de-latin1" > /etc/vconsole.conf
 sed -i 's/^HOOKS.*$/HOOKS=(base udev autodetect modconf block keyboard systemd sd-zfs filesystems)/' /etc/mkinitcpio.conf
 
 # mkinitcpio-sd-zfs
-su - install -c "git clone https://aur.archlinux.org/mkinitcpio-sd-zfs.git"
-su - install -c "cd mkinitcpio-sd-zfs && makepkg"
-pacman --noconfirm -U /home/install/mkinitcpio-sd-zfs/mkinitcpio-sd-zfs-*.pkg.tar.xz
+as_aur_user "git clone https://aur.archlinux.org/mkinitcpio-sd-zfs.git"
+as_aur_user "cd mkinitcpio-sd-zfs && makepkg --noconfirm -si"
 
 # zedenv & dependencies
-su - install -c "git clone https://aur.archlinux.org/zedenv.git"
-su - install -c "git clone https://aur.archlinux.org/python-pyzfscmds.git"
-su - install -c "cd python-pyzfscmds && makepkg"
-pacman --noconfirm -U /home/install/python-pyzfscmds/python-pyzfscmds-*.pkg.tar.xz
-su - install -c "cd zedenv && makepkg"
-pacman --noconfirm -U /home/install/zedenv/zedenv-*.pkg.tar.xz
+as_aur_user "git clone https://aur.archlinux.org/zedenv.git"
+as_aur_user "git clone https://aur.archlinux.org/python-pyzfscmds.git"
+as_aur_user "cd python-pyzfscmds && makepkg --noconfirm -si"
+as_aur_user "cd zedenv && makepkg --noconfirm -si"
 
 # Build the initramfs once again to have the zfs and the systemd support we just built in it.
 # mkinitcpio -p linux
@@ -220,7 +233,6 @@ default arch
 timeout 3
 EOF
 
-#FIXME: We have to take care of the kernel names (lts / non-lts)
 cat > /mnt/boot/loader/entries/arch.conf << EOF
 title	Arch Linux
 linux	/vmlinuz-linux${LTS}
