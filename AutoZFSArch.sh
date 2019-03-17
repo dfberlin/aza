@@ -11,7 +11,7 @@ LTS="-lts"
 
 # Can be dkms or binary
 ZFS_KERNEL_MODULES=dkms
-ZFS_KERNEL_MODULES=binary
+#ZFS_KERNEL_MODULES=binary
 
 EXTRA_PKGS="base-devel git "	# Required to build AUR packages.
 EXTRA_PKGS+="openssh "
@@ -22,6 +22,8 @@ EXTRA_PKGS+="netctl "			# The Arch kernel seams to pull this as a dependancy whi
 GPT_MAX_LABEL_LENGTH=72
 ZEDENV_PKGS="python python-setuptools python-click python-pip"
 BY=by-partlabel
+zfs_linux=""
+[ $ZFS_KERNEL_MODULES = "binary" ] && zfs_linux=zfs-linux${LTS}
 
 disk_id() {
     # Echo the /dev/disk/$2 entry that matches $1
@@ -59,6 +61,15 @@ message() {
 
 chexec() {
 	arch-chroot /mnt $1
+}
+
+chexec_aur() {
+	local cmd=""
+	local pos
+	for pos in $@ ; do
+		cmd+="$pos "
+	done
+	arch-chroot /mnt su - install -c "$cmd"
 }
 
 enable_networking_dhcp_classic_naming() {
@@ -145,7 +156,7 @@ pacman-key --lsign-key F75D9D76
 # This way we have the choice to use any kernel package we want (lts or non-lts)
 # for the base system while skipping the default kernel.
 base_stripped=$(pacman -Sg base | sed 's/^base //; /^linux$/d' | tr '\n' ' ')
-pacstrap /mnt $base_stripped linux${LTS} zfs-linux${LTS} pacman
+pacstrap /mnt $base_stripped linux${LTS} $zfs_linux pacman
 
 #
 # Now we are free to chroot into the fresh system.
@@ -170,21 +181,36 @@ set_hostname
 # Enable the ssh server. Yes root has no password, but in the default configutration openssh does not allow root logins anyway.
 #enable_sshd
 
+mkdir -p /mnt/etc/zfs
+
+# Starting form here we might need to build software form source.
+echo "MAKEFLAGS=\"-j$(cpu_core_count)\"" >> /mnt/etc/makepkg.conf
+
 # The repo is only required in case binary zfs related modules have been choosen.
 if [ $ZFS_KERNEL_MODULES = "binary" ] ; then
 	echo -e '[archzfs]\nServer = http://archzfs.com/$repo/x86_64' >> /mnt/etc/pacman.conf
 	chexec "pacman-key -r F75D9D76"
 	chexec "pacman-key --lsign-key F75D9D76"
+else
+	# The DKMS case ...
+	# We need kernel headers for the installed kernel in order to build kernel modules.
+	chexec "pacman --noconfirm -S linux${LTS}-headers"
+	message "Checking out sources required by zfs-dkms."
+	chexec_aur git clone https://aur.archlinux.org/spl-dkms.git
+	chexec_aur git clone https://aur.archlinux.org/zfs-utils.git
+	chexec_aur git clone https://aur.archlinux.org/zfs-dkms.git
+	# Build and install the packages
+	chexec_aur "cd spl-dkms && makepkg --skippgpcheck --noconfirm -si"
+	chexec_aur "cd zfs-utils && makepkg --skippgpcheck --noconfirm -si"
+	chexec_aur "cd zfs-dkms && makepkg --skippgpcheck --noconfirm -si"
 fi
-
-mkdir -p /mnt/etc/zfs
 
 #
 # Build and install AUR packages
 #
 message "Building and installing AUR packages."
 # Potentially speed up building of packages by enabeling parallel builds.
-echo "MAKEFLAGS=\"-j$(cpu_core_count)\"" >> /mnt/etc/makepkg.conf
+
 
 cat > /mnt/home/install/setup.sh << EOF
 #!/bin/bash
