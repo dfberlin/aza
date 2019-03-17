@@ -8,9 +8,16 @@ DEVICE=vda
 EFI_END=512
 LTS="-lts"
 LTS=""
+
 # Can be dkms or binary
 ZFS_KERNEL_MODULES=dkms
 ZFS_KERNEL_MODULES=binary
+
+EXTRA_PKGS="base-devel git "	# Required to build AUR packages.
+EXTRA_PKGS+="openssh "
+EXTRA_PKGS+="netctl "			# The Arch kernel seams to pull this as a dependancy while the LTS kernel does not ...
+
+
 
 GPT_MAX_LABEL_LENGTH=72
 ZEDENV_PKGS="python python-setuptools python-click python-pip"
@@ -139,7 +146,7 @@ pacman-key --lsign-key F75D9D76
 # for the base system while skipping the default kernel.
 base_stripped=$(pacman -Sg base | sed 's/^base //; /^linux$/d' | tr '\n' ' ')
 #pacstrap /mnt base zfs-linux base-devel git $ZEDENV_PKGS openssh
-pacstrap /mnt $base_stripped linux${LTS} zfs-linux${LTS} base-devel git $ZEDENV_PKGS openssh
+pacstrap /mnt $base_stripped linux${LTS} zfs-linux${LTS} $ZEDENV_PKGS $EXTRA_PKGS
 #pacstrap /mnt $base_stripped linux${LTS} base-devel git
 
 # Home directory for temporary install user
@@ -152,7 +159,7 @@ echo "install ALL=(ALL) NOPASSWD: ALL" > /mnt/etc/sudoers.d/install
 # Add an fstab entry for the EFI partition.
 echo "/dev/disk/by-id/$(disk_id ${DEVICE}1) /boot vfat defaults 0 1" >> /mnt/etc/fstab
 # Enable classic interface naming and dhcp for eth0
-#enable_networking_dhcp_classic_naming
+enable_networking_dhcp_classic_naming
 # Set the hostname
 set_hostname
 # Enable the ssh server. Yes root has no password, but in the default configutration openssh does not allow root logins anyway.
@@ -216,8 +223,8 @@ EOF
 #FIXME: We have to take care of the kernel names (lts / non-lts)
 cat > /mnt/boot/loader/entries/arch.conf << EOF
 title	Arch Linux
-linux	/vmlinuz-linux
-initrd	/initramfs-linux.img
+linux	/vmlinuz-linux${LTS}
+initrd	/initramfs-linux${LTS}.img
 options	root=zfs:${POOL}/ROOT/default rw
 EOF
 
